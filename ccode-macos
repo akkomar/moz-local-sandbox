@@ -315,6 +315,7 @@ PROFILE=$(cat <<SBPROFILE
   (subpath "$HOME/.config/claude")
   (subpath "$HOME/.config/jj")
   (subpath "$HOME/.rustup")
+  (subpath "$HOME/.local/share/uv")
   (subpath "$HOME/.cargo/bin")
   (literal "$HOME/.ssh/known_hosts")
   (literal "$HOME/.ssh/config"))
