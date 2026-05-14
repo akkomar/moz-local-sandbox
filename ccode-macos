@@ -409,10 +409,25 @@ ENV_ARGS=(
 # about the conflict between the env-var token and the /login-managed
 # keychain key. So we let the keychain be the single source of truth.
 
-# Forward the GitHub token so gh(1) can authenticate inside the sandbox.
-# The token lives in the host keyring and is not present in ~/.config/gh,
-# so we read it at launch time.
-if _GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n "$_GH_TOKEN" ]]; then
+# Forward a GitHub token so gh(1) can authenticate inside the sandbox.
+# Caller-provided $CCODE_GH_TOKEN wins; otherwise fall back to the host's
+# currently-active token via `gh auth token`. To inject a scoped token
+# (e.g. a read-only PAT stored in 1Password), compose it at the call
+# site, for example:
+#   CCODE_GH_TOKEN=$(op read 'op://Employee/ccode-gh/credential') ccode-macos
+#
+# Caveat: forwarding a scoped token does not by itself prevent an
+# adversarial agent inside the sandbox from running `env -u GH_TOKEN
+# gh auth token` to query the host keychain and recover the full-access
+# token gh is currently logged in with. The keychain entry's ACL is
+# keyed by gh's code signature, which sandbox-exec does not change. A
+# future iteration could inject GH credentials at the netproxy layer
+# so the token never enters the sandbox env at all; for now, the
+# netproxy still limits the destinations a recovered token can be used
+# against.
+if [[ -n "${CCODE_GH_TOKEN:-}" ]]; then
+    ENV_ARGS+=(GH_TOKEN="$CCODE_GH_TOKEN")
+elif _GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n "$_GH_TOKEN" ]]; then
     ENV_ARGS+=(GH_TOKEN="$_GH_TOKEN")
 fi
 [[ -n "${PHABRICATOR_TOKEN:-}" ]] && ENV_ARGS+=(PHABRICATOR_TOKEN="$PHABRICATOR_TOKEN")
