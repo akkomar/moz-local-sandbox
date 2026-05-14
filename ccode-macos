@@ -52,6 +52,7 @@ mkdir -p \
     "$SBX/npm-prefix" \
     "$SBX/pip" \
     "$SBX/go" \
+    "$SBX/m2/repository" \
     "$SBX/empty-hooks"
 
 # ~/.claude is shared rw with the host (re-exposed below). We had it
@@ -270,6 +271,7 @@ $PROFILE_NETWORK
   (subpath "$HOME/.config/jj")
   (subpath "$HOME/.rustup")
   (subpath "$HOME/.local/share/uv")
+  (subpath "$HOME/.sdkman")
   (subpath "$HOME/.cargo/bin")
   (literal "$HOME/.ssh/known_hosts")
   (literal "$HOME/.ssh/config"))
@@ -334,7 +336,10 @@ ENV_ARGS=(
     LANG="${LANG:-en_US.UTF-8}"
     # Sandbox-installed cargo bin first, then host cargo bin (read-only,
     # provides the rustup-managed `cargo`/`rustc` shims), then the rest.
-    PATH="$SBX/cargo/bin:$HOME/.cargo/bin:$HOME/.local/bin:$SBX/npm-prefix/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
+    # SDKMAN-managed java current bin is added so JDK tooling (java, javac,
+    # plus mvn etc. if installed via sdk) is on PATH. `sdk install` itself
+    # cannot run inside the sandbox — manage SDKs on the host.
+    PATH="$SBX/cargo/bin:$HOME/.cargo/bin:$HOME/.local/bin:$SBX/npm-prefix/bin:$HOME/.sdkman/candidates/java/current/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin"
 
     # Toolchain caches redirected to sandbox-private locations.
     NPM_CONFIG_CACHE="$SBX/npm"
@@ -344,6 +349,13 @@ ENV_ARGS=(
     GOMODCACHE="$SBX/go/pkg/mod"
     CARGO_HOME="$SBX/cargo"
     UV_CACHE_DIR="$SBX/uv"
+
+    # Maven local repository redirected into the sandbox-private dir.
+    # Maven reads `maven.repo.local` as a JVM system property; passing it
+    # via MAVEN_OPTS makes every `mvn` invocation in the sandbox use the
+    # private cache without touching project files. Same pattern as
+    # CARGO_HOME / UV_CACHE_DIR — first build repopulates from scratch.
+    MAVEN_OPTS="-Dmaven.repo.local=$SBX/m2/repository"
 
     # Rust toolchains (rustup-managed): host-shared, read-only. `rustup
     # update` will fail inside the sandbox by design — install toolchains
@@ -392,6 +404,16 @@ if [[ -n "${MOZCONFIG:-}" ]]; then
 fi
 if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
     ENV_ARGS+=(SSH_AUTH_SOCK="$SSH_AUTH_SOCK")
+fi
+
+# JAVA_HOME from SDKMAN's `current` symlink if present. Without this,
+# `mvn` picks whatever JDK is bundled with the Homebrew install of
+# Maven (often newer than the project requires), and `enforce-java`
+# rules fail. Mirrors how the script handles other host toolchains:
+# the SDK store is mounted RO, and we point the relevant env var at
+# its `current` selector. `sdk use java <ver>` runs on the host.
+if [[ -d "$HOME/.sdkman/candidates/java/current" ]]; then
+    ENV_ARGS+=(JAVA_HOME="$HOME/.sdkman/candidates/java/current")
 fi
 
 # When the netproxy is running, point the sandbox's HTTP and TCP clients

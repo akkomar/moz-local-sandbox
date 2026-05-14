@@ -25,6 +25,9 @@
     "files.pythonhosted.org",
     "*.pythonhosted.org",
 
+    "repo.maven.apache.org",
+    "repo1.maven.org",
+
     "hg.mozilla.org",
     "*.mozilla.org",
     "*.mozilla.com",
