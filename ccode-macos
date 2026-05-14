@@ -40,6 +40,30 @@ else
     RW_ROOT="$SRC"
 fi
 
+# Extra read-only paths, colon-separated absolute paths. Lets one project
+# be exposed rw while a sibling tree is reachable read-only — useful for
+# cross-repo reference without giving the agent write access. Example:
+#   CCODE_CWD_ONLY=1 CCODE_RO_EXTRA=~/mozilla/dev ccode
+# Each path must be absolute and existing; otherwise the launcher errors.
+# Tilde at the start of a path is expanded to $HOME. A path that overlaps
+# the rw root remains rw — the rule just adds a redundant read allow.
+RO_EXTRA_PATHS=()
+if [[ -n "${CCODE_RO_EXTRA:-}" ]]; then
+    IFS=':' read -ra _ro_split <<< "$CCODE_RO_EXTRA"
+    for _p in "${_ro_split[@]}"; do
+        _p="${_p/#\~/$HOME}"
+        if [[ "$_p" != /* ]]; then
+            echo "ccode: CCODE_RO_EXTRA path must be absolute: $_p" >&2
+            exit 1
+        fi
+        if [[ ! -e "$_p" ]]; then
+            echo "ccode: CCODE_RO_EXTRA path does not exist: $_p" >&2
+            exit 1
+        fi
+        RO_EXTRA_PATHS+=("$_p")
+    done
+fi
+
 # Sandbox-private homes for language toolchains. macOS has no bind-mount
 # equivalent, so we redirect each toolchain via its own env var
 # (CARGO_HOME, NPM_CONFIG_*, etc.). The host caches stay readable but the
@@ -415,6 +439,14 @@ fi
 if [[ -d "$HOME/.sdkman/candidates/java/current" ]]; then
     ENV_ARGS+=(JAVA_HOME="$HOME/.sdkman/candidates/java/current")
 fi
+
+# Append extra read-only paths from CCODE_RO_EXTRA. Comes after the main
+# rw block: sandbox-exec is allow-only here (no deny needed), and a path
+# that overlaps the rw root keeps its rw allow regardless of order.
+for _p in "${RO_EXTRA_PATHS[@]}"; do
+    PROFILE+=$'\n'";; CCODE_RO_EXTRA: $_p"
+    PROFILE+=$'\n'"(allow file-read* (subpath \"$_p\"))"
+done
 
 # When the netproxy is running, point the sandbox's HTTP and TCP clients
 # at it. Tools that respect HTTP_PROXY/HTTPS_PROXY (curl, git, npm, pip,
