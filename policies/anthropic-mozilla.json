@@ -46,6 +46,11 @@
     "product-details.mozilla.org",
     "addons.mozilla.org",
 
+    "mozilla-hub.atlassian.net",
+    "mcp.atlassian.com",
+    "*.mcp.atlassian.com",
+    "*.acryl.io",
+
     "*.gstatic.com",
     "*.googleapis.com"
   ],
