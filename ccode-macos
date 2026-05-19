@@ -77,6 +77,7 @@ mkdir -p \
     "$SBX/pip" \
     "$SBX/go" \
     "$SBX/m2/repository" \
+    "$SBX/xdg-cache" \
     "$SBX/empty-hooks"
 
 # ~/.claude is shared rw with the host (re-exposed below). We had it
@@ -380,6 +381,16 @@ ENV_ARGS=(
     # private cache without touching project files. Same pattern as
     # CARGO_HOME / UV_CACHE_DIR — first build repopulates from scratch.
     MAVEN_OPTS="-Dmaven.repo.local=$SBX/m2/repository"
+
+    # XDG cache root for any tool whose cache lives under ~/.cache/ by
+    # default — pre-commit (hook-repo clones + sqlite index), gh (run-log
+    # downloads), and others. The sandbox blocks writes to ~/.cache/, so
+    # without this redirect e.g. `pre-commit run` fails with "unable to
+    # open database file" and `gh run view --log` exits with "operation
+    # not permitted". Tool-specific vars above (NPM_CONFIG_CACHE,
+    # PIP_CACHE_DIR, CARGO_HOME, ...) take precedence where set; this
+    # catches the long tail of XDG-honoring tools.
+    XDG_CACHE_HOME="$SBX/xdg-cache"
 
     # Rust toolchains (rustup-managed): host-shared, read-only. `rustup
     # update` will fail inside the sandbox by design — install toolchains
