@@ -541,6 +541,64 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── Optional: GCP service-account credentials for in-sandbox use. ────────
+#
+# Set CCODE_GCP_SA_KEY to the absolute path of a JSON key file for a
+# service account in a self-serve "Sandbox GCP project" (a narrow-scope
+# project where devs can mint SAs without production reach). When set,
+# the launcher:
+#
+#   1. read-only mounts the key file (file literal, not the parent dir,
+#      so the agent sees exactly this key and nothing alongside it);
+#   2. exports GOOGLE_APPLICATION_CREDENTIALS so ADC-using GCP libraries
+#      (Python google-cloud-*, Java, Go) authenticate as the SA;
+#   3. redirects CLOUDSDK_CONFIG to $SBX/gcloud so the gcloud CLI's
+#      active-account / cached-token state stays inside the sandbox and
+#      never touches the host ~/.config/gcloud/;
+#   4. runs `gcloud auth activate-service-account` once so the gcloud,
+#      bq, and gsutil CLIs work in-sandbox without manual setup.
+#
+# Trade-off: the key file is long-lived and at rest on disk. A
+# compromised agent that can both read the file AND exfiltrate it to an
+# allowlisted network destination defeats this scheme; rotation cadence
+# and IAM-scope discipline are the user's responsibility. The
+# alternative — a loopback HTTP server emulating the GCE metadata API
+# that mints short-lived tokens on demand — would remove the key-at-rest
+# property and let this whole block be deleted.
+#
+# Note: --print-profile exited earlier, so the file-read rule added
+# here is not visible in printed-profile output. This block is otherwise
+# self-contained; the four feature pieces above can be ripped out in
+# one delete when a metadata-API alternative supersedes it.
+if [[ -n "${CCODE_GCP_SA_KEY:-}" ]]; then
+    CCODE_GCP_SA_KEY="${CCODE_GCP_SA_KEY/#\~/$HOME}"
+    if [[ "$CCODE_GCP_SA_KEY" != /* ]]; then
+        echo "ccode: CCODE_GCP_SA_KEY must be an absolute path: $CCODE_GCP_SA_KEY" >&2
+        exit 1
+    fi
+    if [[ ! -r "$CCODE_GCP_SA_KEY" ]]; then
+        echo "ccode: CCODE_GCP_SA_KEY not readable: $CCODE_GCP_SA_KEY" >&2
+        exit 1
+    fi
+    mkdir -p "$SBX/gcloud"
+
+    PROFILE+=$'\n'";; CCODE_GCP_SA_KEY: $CCODE_GCP_SA_KEY"
+    PROFILE+=$'\n'"(allow file-read* (literal \"$CCODE_GCP_SA_KEY\"))"
+
+    ENV_ARGS+=(
+        GOOGLE_APPLICATION_CREDENTIALS="$CCODE_GCP_SA_KEY"
+        CLOUDSDK_CONFIG="$SBX/gcloud"
+    )
+
+    if ! env -i "${ENV_ARGS[@]}" sandbox-exec -p "$PROFILE" \
+            "$(command -v gcloud)" auth activate-service-account \
+            --key-file="$CCODE_GCP_SA_KEY" --quiet >/dev/null 2>&1; then
+        echo "ccode: gcloud auth activate-service-account failed for $CCODE_GCP_SA_KEY" >&2
+        exit 1
+    fi
+fi
+# ── end CCODE_GCP_SA_KEY ─────────────────────────────────────────────────
+
 # bypassPermissions: filesystem restrictions above replace claude's per-tool
 # permission prompts. --mcp-config is added if the user has one.
 CLAUDE_ARGS=(--permission-mode bypassPermissions)
