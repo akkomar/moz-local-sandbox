@@ -294,6 +294,7 @@ $PROFILE_NETWORK
   (subpath "$HOME/.config/gh")
   (subpath "$HOME/.config/claude")
   (subpath "$HOME/.config/jj")
+  (subpath "$HOME/.config/gcx")
   (subpath "$HOME/.rustup")
   (subpath "$HOME/.local/share/uv")
   (subpath "$HOME/.sdkman")
