@@ -389,7 +389,15 @@ ENV_ARGS=(
     # via MAVEN_OPTS makes every `mvn` invocation in the sandbox use the
     # private cache without touching project files. Same pattern as
     # CARGO_HOME / UV_CACHE_DIR — first build repopulates from scratch.
-    MAVEN_OPTS="-Dmaven.repo.local=$SBX/m2/repository"
+    #
+    # java.net.preferIPv4Stack=true forces the JVM to use IPv4 sockets.
+    # The sandbox loopback allow rule `(remote ip "localhost:*")` matches
+    # only IPv4 sockets, so without this flag JVM's default dual-stack
+    # IPv6 sockets get denied at the kernel with "Operation not permitted"
+    # — even when connecting to 127.0.0.1 through netproxy. A broader
+    # SBPL-level fix (IPv6 loopback allow) could replace this if other
+    # JVM tools start hitting the same issue.
+    MAVEN_OPTS="-Dmaven.repo.local=$SBX/m2/repository -Djava.net.preferIPv4Stack=true"
 
     # XDG cache root for any tool whose cache lives under ~/.cache/ by
     # default — pre-commit (hook-repo clones + sqlite index), gh (run-log
@@ -490,7 +498,23 @@ done
 # speaks SOCKS5 (notably ssh with -o ProxyCommand or recent gh versions
 # for SSH-mode git). NO_PROXY excludes loopback so direct connections to
 # the proxy itself don't loop infinitely.
+#
+# Maven (3.9+) ignores both HTTP_PROXY env vars AND -Dhttps.proxyHost
+# JVM system properties for its native resolver — proxies have to come
+# from settings.xml. We render maven/settings.xml.template into
+# \$SBX/m2/settings.xml with the netproxy port baked in, and pass
+# MAVEN_ARGS=-s ... so every mvn invocation picks it up.
+#
+# settings.xml only covers the Maven Resolver path. Plugins that do
+# their own HTTP (Spotless's eclipse-jdt formatter, etc.) bypass it and
+# use java.net.URL / OkHttp / Apache HttpClient, which read -Dhttps.proxyHost
+# from the JVM. We therefore re-emit MAVEN_OPTS here with the proxy
+# system properties appended (env's last-wins overrides the earlier
+# definition); both proxy paths are configured in policy mode.
 if [[ -n "$NETPROXY_HTTP_PORT" && "$NETPROXY_HTTP_PORT" != "<HTTP_PORT>" ]]; then
+    /usr/bin/sed "s|__NETPROXY_HTTP_PORT__|$NETPROXY_HTTP_PORT|g" \
+        "$REPO_DIR/maven/settings.xml.template" > "$SBX/m2/settings.xml"
+
     ENV_ARGS+=(
         HTTP_PROXY="http://127.0.0.1:$NETPROXY_HTTP_PORT"
         HTTPS_PROXY="http://127.0.0.1:$NETPROXY_HTTP_PORT"
@@ -500,6 +524,8 @@ if [[ -n "$NETPROXY_HTTP_PORT" && "$NETPROXY_HTTP_PORT" != "<HTTP_PORT>" ]]; the
         all_proxy="socks5h://127.0.0.1:$NETPROXY_SOCKS_PORT"
         NO_PROXY="localhost,127.0.0.1,::1"
         no_proxy="localhost,127.0.0.1,::1"
+        MAVEN_ARGS="-s $SBX/m2/settings.xml"
+        MAVEN_OPTS="-Dmaven.repo.local=$SBX/m2/repository -Djava.net.preferIPv4Stack=true -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=$NETPROXY_HTTP_PORT -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=$NETPROXY_HTTP_PORT -Dhttp.nonProxyHosts=localhost|127.0.0.1"
     )
 fi
 

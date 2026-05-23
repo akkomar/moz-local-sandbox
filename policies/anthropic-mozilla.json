@@ -27,6 +27,8 @@
 
     "repo.maven.apache.org",
     "repo1.maven.org",
+    "jitpack.io",
+    "*.eclipse.org",
 
     "proxy.golang.org",
     "sum.golang.org",

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven settings rendered by ccode-macos into $SBX/m2/settings.xml at
+  launch time. The placeholder __NETPROXY_HTTP_PORT__ is substituted
+  with the netproxy HTTP port chosen for the current sandbox session.
+
+  Two proxy entries (http and https) point at the same loopback
+  netproxy endpoint — Maven's <protocol> field selects which entry to
+  use based on the URL scheme of the artifact repository being
+  contacted. nonProxyHosts skips loopback so localhost services
+  aren't routed back through the proxy.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.2.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.2.0
+                              https://maven.apache.org/xsd/settings-1.2.0.xsd">
+  <proxies>
+    <proxy>
+      <id>ccode-netproxy-http</id>
+      <active>true</active>
+      <protocol>http</protocol>
+      <host>127.0.0.1</host>
+      <port>__NETPROXY_HTTP_PORT__</port>
+      <nonProxyHosts>localhost|127.0.0.1</nonProxyHosts>
+    </proxy>
+    <proxy>
+      <id>ccode-netproxy-https</id>
+      <active>true</active>
+      <protocol>https</protocol>
+      <host>127.0.0.1</host>
+      <port>__NETPROXY_HTTP_PORT__</port>
+      <nonProxyHosts>localhost|127.0.0.1</nonProxyHosts>
+    </proxy>
+  </proxies>
+</settings>
