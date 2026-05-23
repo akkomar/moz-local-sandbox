@@ -28,6 +28,9 @@
     "repo.maven.apache.org",
     "repo1.maven.org",
 
+    "proxy.golang.org",
+    "sum.golang.org",
+
     "hg.mozilla.org",
     "*.mozilla.org",
     "*.mozilla.com",

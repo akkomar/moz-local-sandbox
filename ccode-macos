@@ -76,6 +76,7 @@ mkdir -p \
     "$SBX/npm-prefix" \
     "$SBX/pip" \
     "$SBX/go" \
+    "$SBX/go-build" \
     "$SBX/m2/repository" \
     "$SBX/xdg-cache" \
     "$SBX/empty-hooks"
@@ -373,6 +374,13 @@ ENV_ARGS=(
     PIP_CACHE_DIR="$SBX/pip"
     GOPATH="$SBX/go"
     GOMODCACHE="$SBX/go/pkg/mod"
+    # macOS default GOCACHE is ~/Library/Caches/go-build/ which the
+    # sandbox blocks. Go on Linux honors XDG_CACHE_HOME for the build
+    # cache, but on macOS Go ignores that and uses the Library/Caches
+    # path unless GOCACHE is explicitly set. Conventionally separate
+    # from GOPATH (Go's own layout keeps them apart), so live as a
+    # sibling under $SBX rather than under $SBX/go.
+    GOCACHE="$SBX/go-build"
     CARGO_HOME="$SBX/cargo"
     UV_CACHE_DIR="$SBX/uv"
 
