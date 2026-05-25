@@ -64,6 +64,30 @@ if [[ -n "${CCODE_RO_EXTRA:-}" ]]; then
     done
 fi
 
+# Extra read-write paths, colon-separated absolute paths. Beyond the
+# primary rw root ($RW_ROOT), expose additional trees rw so a session
+# can edit files in multiple projects at once (e.g. a feature that
+# spans two repos). Each path becomes its own subpath allow rule;
+# overlaps with the primary rw root are redundant but harmless.
+# Tildes are expanded. The noexec sweep (CCODE_NOEXEC=1) covers these
+# paths as well.
+RW_EXTRA_PATHS=()
+if [[ -n "${CCODE_RW_EXTRA:-}" ]]; then
+    IFS=':' read -ra _rw_split <<< "$CCODE_RW_EXTRA"
+    for _p in "${_rw_split[@]}"; do
+        _p="${_p/#\~/$HOME}"
+        if [[ "$_p" != /* ]]; then
+            echo "ccode: CCODE_RW_EXTRA path must be absolute: $_p" >&2
+            exit 1
+        fi
+        if [[ ! -e "$_p" ]]; then
+            echo "ccode: CCODE_RW_EXTRA path does not exist: $_p" >&2
+            exit 1
+        fi
+        RW_EXTRA_PATHS+=("$_p")
+    done
+fi
+
 # Sandbox-private homes for language toolchains. macOS has no bind-mount
 # equivalent, so we redirect each toolchain via its own env var
 # (CARGO_HOME, NPM_CONFIG_*, etc.). The host caches stay readable but the
@@ -485,10 +509,19 @@ fi
 
 # Append extra read-only paths from CCODE_RO_EXTRA. Comes after the main
 # rw block: sandbox-exec is allow-only here (no deny needed), and a path
-# that overlaps the rw root keeps its rw allow regardless of order.
-for _p in "${RO_EXTRA_PATHS[@]}"; do
+# that overlaps the rw root keeps its rw allow regardless of order. The
+# `${arr[@]+"${arr[@]}"}` guard avoids "unbound variable" under bash 3.2
+# + set -u when the array is empty (i.e. when CCODE_RO_EXTRA is unset).
+for _p in ${RO_EXTRA_PATHS[@]+"${RO_EXTRA_PATHS[@]}"}; do
     PROFILE+=$'\n'";; CCODE_RO_EXTRA: $_p"
     PROFILE+=$'\n'"(allow file-read* (subpath \"$_p\"))"
+done
+
+# Append extra read-write paths from CCODE_RW_EXTRA. Same shape as the
+# RO loop above but with file-write* added.
+for _p in ${RW_EXTRA_PATHS[@]+"${RW_EXTRA_PATHS[@]}"}; do
+    PROFILE+=$'\n'";; CCODE_RW_EXTRA: $_p"
+    PROFILE+=$'\n'"(allow file-read* file-write* (subpath \"$_p\"))"
 done
 
 # When the netproxy is running, point the sandbox's HTTP and TCP clients
@@ -561,13 +594,19 @@ cleanup() {
     if [[ -n "$NOEXEC_MARKER" && -f "$NOEXEC_MARKER" ]]; then
         # find: files newer than the marker that currently have any x bit set,
         # then chmod a-x. -perm +ugo+x matches if ANY x bit is set. The `+`
-        # batches into single chmod invocations for speed.
+        # batches into single chmod invocations for speed. Scan spans the
+        # primary rw root and every CCODE_RW_EXTRA path so binaries dropped
+        # in any writable tree get stripped. The `${arr[@]+...}` guard
+        # avoids "unbound variable" under bash 3.2 + set -u when the array
+        # is empty.
         local count
-        count=$(/usr/bin/find "$RW_ROOT" -type f -newer "$NOEXEC_MARKER" \
+        count=$(/usr/bin/find "$RW_ROOT" ${RW_EXTRA_PATHS[@]+"${RW_EXTRA_PATHS[@]}"} \
+                    -type f -newer "$NOEXEC_MARKER" \
                     -perm +ugo+x 2>/dev/null | /usr/bin/wc -l | /usr/bin/tr -d ' ')
         if [[ "$count" -gt 0 ]]; then
-            echo "ccode: noexec — stripping +x from $count file(s) modified during session" >&2
-            /usr/bin/find "$RW_ROOT" -type f -newer "$NOEXEC_MARKER" \
+            echo "ccode: noexec - stripping +x from $count file(s) modified during session" >&2
+            /usr/bin/find "$RW_ROOT" ${RW_EXTRA_PATHS[@]+"${RW_EXTRA_PATHS[@]}"} \
+                -type f -newer "$NOEXEC_MARKER" \
                 -perm +ugo+x -exec /bin/chmod a-x {} + 2>/dev/null
         fi
         rm -f "$NOEXEC_MARKER"

@@ -95,6 +95,38 @@ expect "deny pbcopy (clipboard)"     deny run_sb /bin/sh -c "echo test | /usr/bi
 rm -f "$HOME/.ccode-test-bad-DELETE-ME" "$HOME/.claude/.ccode-test-bad-DELETE-ME" 2>/dev/null
 
 echo
+echo "==== profile: CCODE_RW_EXTRA (additional writable trees) ===="
+TEST_RW_EXTRA_A="$TMP/rw-extra-a"
+TEST_RW_EXTRA_B="$TMP/rw-extra-b"
+mkdir -p "$TEST_RW_EXTRA_A" "$TEST_RW_EXTRA_B"
+PROFILE_FILE_RW="$TMP/profile-rw-extra.sb"
+CCODE_SRC="$TEST_RW" CCODE_RW_EXTRA="$TEST_RW_EXTRA_A:$TEST_RW_EXTRA_B" \
+    "$SCRIPT" --print-profile > "$PROFILE_FILE_RW" \
+    || { echo "FATAL: failed to generate CCODE_RW_EXTRA profile"; exit 2; }
+run_sb_rw() { sandbox-exec -f "$PROFILE_FILE_RW" "$@"; }
+expect "write to first CCODE_RW_EXTRA path"  ok run_sb_rw /bin/sh -c "echo a > $TEST_RW_EXTRA_A/probe"
+expect "write to second CCODE_RW_EXTRA path" ok run_sb_rw /bin/sh -c "echo b > $TEST_RW_EXTRA_B/probe"
+expect "primary RW_ROOT still writable"      ok run_sb_rw /bin/sh -c "echo c > $TEST_RW/probe-rw-extra"
+if grep -q "CCODE_RW_EXTRA: $TEST_RW_EXTRA_A" "$PROFILE_FILE_RW" && \
+   grep -q "CCODE_RW_EXTRA: $TEST_RW_EXTRA_B" "$PROFILE_FILE_RW"; then
+    ok "both CCODE_RW_EXTRA entries appear as labelled subpaths"
+else
+    fail "both CCODE_RW_EXTRA entries appear as labelled subpaths" "missing marker comment(s) in profile"
+fi
+# Rejects an unset/missing path before the profile is generated.
+if CCODE_SRC="$TEST_RW" CCODE_RW_EXTRA="$TMP/does-not-exist" "$SCRIPT" --print-profile >/dev/null 2>&1; then
+    fail "CCODE_RW_EXTRA rejects nonexistent paths" "script accepted a missing path"
+else
+    ok "CCODE_RW_EXTRA rejects nonexistent paths"
+fi
+# Rejects a relative path.
+if CCODE_SRC="$TEST_RW" CCODE_RW_EXTRA="relative/path" "$SCRIPT" --print-profile >/dev/null 2>&1; then
+    fail "CCODE_RW_EXTRA rejects relative paths" "script accepted a relative path"
+else
+    ok "CCODE_RW_EXTRA rejects relative paths"
+fi
+
+echo
 echo "==== script: env handling (env -i + redirects) ===="
 mkdir -p "$TMP/stub-bin"
 cat > "$TMP/stub-bin/claude" <<'STUB'
