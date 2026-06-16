@@ -103,6 +103,7 @@ mkdir -p \
     "$SBX/go-build" \
     "$SBX/m2/repository" \
     "$SBX/xdg-cache" \
+    "$SBX/xdg-data" \
     "$SBX/empty-hooks"
 
 # ~/.claude is shared rw with the host (re-exposed below). We had it
@@ -432,6 +433,14 @@ ENV_ARGS=(
     # PIP_CACHE_DIR, CARGO_HOME, ...) take precedence where set; this
     # catches the long tail of XDG-honoring tools.
     XDG_CACHE_HOME="$SBX/xdg-cache"
+
+    # XDG data root for tools whose persistent state lives under
+    # ~/.local/share/<tool>/ by default. Specifically, uv writes its
+    # downloaded Python interpreters and tool envs there, which the
+    # sandbox blocks, breaking `uvx` and `uv tool install`. Redirecting
+    # via XDG_DATA_HOME pins uv (and other XDG-honoring tools) to a
+    # writable sandbox-private dir.
+    XDG_DATA_HOME="$SBX/xdg-data"
 
     # Rust toolchains (rustup-managed): host-shared, read-only. `rustup
     # update` will fail inside the sandbox by design — install toolchains
