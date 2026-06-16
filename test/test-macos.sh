@@ -275,6 +275,191 @@ else
 fi
 
 echo
+echo "==== CCODE_GCP_IMPERSONATE: metadata-server emulator ===="
+# Stub gcloud + a stub claude that probes the metadata server from inside
+# the sandbox. The stub gcloud just returns a fixed token, so we can
+# assert the launcher wires up env vars and the loopback server end-to-end
+# without any real GCP credentials.
+TEST_SA="ccode-test-sa@ccode-test-project.iam.gserviceaccount.com"
+TEST_TOKEN="ya29.ccode-stub-token-marker"
+TEST_PROJECT="ccode-test-project"
+
+mkdir -p "$TMP/gcp-stub-bin"
+cat > "$TMP/gcp-stub-bin/gcloud" <<STUB
+#!/bin/bash
+# Stub gcloud: handles only the calls ccode-macos / ccode-gcp-metadata make.
+# print-access-token: print a fixed token to stdout.
+case "\$*" in
+    *"auth print-access-token"*)
+        echo "$TEST_TOKEN"
+        exit 0
+        ;;
+esac
+echo "stub gcloud: unsupported invocation: \$*" >&2
+exit 2
+STUB
+chmod +x "$TMP/gcp-stub-bin/gcloud"
+
+cat > "$TMP/gcp-stub-bin/claude" <<'STUB'
+#!/bin/bash
+# Stub claude for the impersonate tests: print env, then curl the
+# metadata server's token endpoint from inside the sandbox. Wrap the curl
+# output in markers so the outer test can grep for it.
+env
+if [[ -n "${GCE_METADATA_HOST:-}" ]]; then
+    echo "---TOKEN-PROBE-START---"
+    /usr/bin/curl -s --max-time 5 \
+        -H "Metadata-Flavor: Google" \
+        "http://$GCE_METADATA_HOST/computeMetadata/v1/instance/service-accounts/default/token" \
+        || echo "curl-failed-exit-$?"
+    echo
+    echo "---TOKEN-PROBE-END---"
+fi
+STUB
+chmod +x "$TMP/gcp-stub-bin/claude"
+
+# Happy path: launcher starts the metadata server, env vars are exported,
+# token endpoint serves the stubbed token through loopback.
+gcp_out=$(PATH="$TMP/gcp-stub-bin:$PATH" CCODE_SRC="$TEST_RW" \
+          CCODE_GCP_IMPERSONATE="$TEST_SA" "$SCRIPT" 2>&1 || true)
+
+check_gcp() {
+    local desc="$1" pattern="$2"
+    if grep -qE "$pattern" <<<"$gcp_out"; then ok "$desc"
+    else fail "$desc" "pattern '$pattern' missing from output"; fi
+}
+check_gcp "GCE_METADATA_HOST -> loopback" '^GCE_METADATA_HOST=127\.0\.0\.1:[0-9]+$'
+check_gcp "GCE_METADATA_IP -> loopback"   '^GCE_METADATA_IP=127\.0\.0\.1:[0-9]+$'
+check_gcp "GOOGLE_CLOUD_PROJECT derived from SA email" "^GOOGLE_CLOUD_PROJECT=$TEST_PROJECT$"
+check_gcp "CLOUDSDK_CORE_PROJECT set"                  "^CLOUDSDK_CORE_PROJECT=$TEST_PROJECT$"
+check_gcp "token endpoint returns stub token"          "\"access_token\":\"$TEST_TOKEN\""
+check_gcp "launcher logs server startup"               'gcp-metadata started \(sa='
+
+# Cleanup check: scope the pgrep to this test's SA email so it doesn't
+# false-positive on unrelated ccode-gcp-metadata processes the user may
+# have running for real sessions.
+sleep 0.5
+if pgrep -fl "ccode-gcp-metadata.*$TEST_SA" >/dev/null 2>&1; then
+    fail "gcp-metadata cleaned up on exit" "stray process: $(pgrep -fl ccode-gcp-metadata.*$TEST_SA)"
+else
+    ok "gcp-metadata cleaned up on exit (no stray processes)"
+fi
+
+# CCODE_GCP_PROJECT override: when set, served verbatim instead of
+# parsing the SA email. Check the launcher's startup log on stderr —
+# it includes `project=...` and is visible without needing sandbox-exec
+# to actually run claude.
+gcp_out_override=$(PATH="$TMP/gcp-stub-bin:$PATH" CCODE_SRC="$TEST_RW" \
+                   CCODE_GCP_IMPERSONATE="$TEST_SA" \
+                   CCODE_GCP_PROJECT="other-project" "$SCRIPT" 2>&1 || true)
+if grep -qE 'gcp-metadata started .*project=other-project' <<<"$gcp_out_override"; then
+    ok "CCODE_GCP_PROJECT overrides derived project"
+else
+    fail "CCODE_GCP_PROJECT overrides derived project" \
+         "got: $(grep 'gcp-metadata started' <<<"$gcp_out_override" || echo '<no startup log>')"
+fi
+
+# Same for the default-derivation path: the launcher log shows the SA
+# email's project segment was extracted correctly. This validates the
+# project-derivation code without depending on sandbox-exec.
+if grep -qE "gcp-metadata started .*project=$TEST_PROJECT" <<<"$gcp_out"; then
+    ok "project derived from SA email (visible in launcher log)"
+else
+    fail "project derived from SA email (visible in launcher log)" \
+         "got: $(grep 'gcp-metadata started' <<<"$gcp_out" || echo '<no startup log>')"
+fi
+
+# Malformed SA email rejected.
+out_bad_email=$(PATH="$TMP/gcp-stub-bin:$PATH" CCODE_SRC="$TEST_RW" \
+                CCODE_GCP_IMPERSONATE="not-an-sa-email" "$SCRIPT" 2>&1 || true)
+if grep -q 'must be an SA email' <<<"$out_bad_email"; then
+    ok "rejects malformed CCODE_GCP_IMPERSONATE value"
+else
+    fail "rejects malformed CCODE_GCP_IMPERSONATE value" "got: $out_bad_email"
+fi
+
+# Direct binary test: spawn ccode-gcp-metadata against the stub gcloud,
+# probe the loopback HTTP endpoint, then tear it down. Verifies the
+# token-refresh shell-out path works end-to-end with no sandbox-exec
+# involvement — complements the in-process unit tests.
+GCP_BIN="$REPO/bin/ccode-gcp-metadata"
+if [[ -x "$GCP_BIN" ]]; then
+    GCP_STATUS_FILE="$TMP/gcp-direct-status"
+    GCP_LOG_FILE="$TMP/gcp-direct.log"
+    PATH="$TMP/gcp-stub-bin:$PATH" "$GCP_BIN" \
+        --sa "$TEST_SA" --project "$TEST_PROJECT" \
+        > "$GCP_STATUS_FILE" 2> "$GCP_LOG_FILE" &
+    GCP_DIRECT_PID=$!
+    # Wait briefly for the PORT= line to appear.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if [[ -s "$GCP_STATUS_FILE" ]] && grep -q '^PORT=' "$GCP_STATUS_FILE"; then break; fi
+        sleep 0.1
+    done
+    direct_line=$(head -n1 "$GCP_STATUS_FILE")
+    if [[ "$direct_line" =~ PORT=([0-9]+) ]]; then
+        DIRECT_PORT="${BASH_REMATCH[1]}"
+        # Token endpoint
+        body=$(/usr/bin/curl -s --max-time 5 \
+            -H "Metadata-Flavor: Google" \
+            "http://127.0.0.1:$DIRECT_PORT/computeMetadata/v1/instance/service-accounts/default/token" || true)
+        if grep -q "\"access_token\":\"$TEST_TOKEN\"" <<<"$body"; then
+            ok "direct probe: token endpoint returns stub token through loopback"
+        else
+            fail "direct probe: token endpoint returns stub token through loopback" "body=$body"
+        fi
+        # Email endpoint
+        email_body=$(/usr/bin/curl -s --max-time 5 \
+            -H "Metadata-Flavor: Google" \
+            "http://127.0.0.1:$DIRECT_PORT/computeMetadata/v1/instance/service-accounts/default/email" || true)
+        if [[ "$email_body" == "$TEST_SA" ]]; then
+            ok "direct probe: email endpoint returns the configured SA"
+        else
+            fail "direct probe: email endpoint returns the configured SA" "got: $email_body"
+        fi
+        # Project-id endpoint
+        proj_body=$(/usr/bin/curl -s --max-time 5 \
+            -H "Metadata-Flavor: Google" \
+            "http://127.0.0.1:$DIRECT_PORT/computeMetadata/v1/project/project-id" || true)
+        if [[ "$proj_body" == "$TEST_PROJECT" ]]; then
+            ok "direct probe: project-id endpoint returns the configured project"
+        else
+            fail "direct probe: project-id endpoint returns the configured project" "got: $proj_body"
+        fi
+        # SSRF defence: request without Metadata-Flavor header is rejected.
+        no_flavor=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            "http://127.0.0.1:$DIRECT_PORT/computeMetadata/v1/instance/service-accounts/default/token" || true)
+        if [[ "$no_flavor" == "403" ]]; then
+            ok "direct probe: missing Metadata-Flavor header gets 403"
+        else
+            fail "direct probe: missing Metadata-Flavor header gets 403" "got: $no_flavor"
+        fi
+    else
+        fail "direct probe: binary reported PORT=" "status='$direct_line' log=$(cat "$GCP_LOG_FILE")"
+    fi
+    kill "$GCP_DIRECT_PID" 2>/dev/null || true
+    wait "$GCP_DIRECT_PID" 2>/dev/null || true
+else
+    fail "ccode-gcp-metadata binary present" "binary not found at $GCP_BIN — run \`make\` first"
+fi
+
+# Preflight failure surfaces clearly. Make the stub gcloud fail on
+# print-access-token to simulate missing tokenCreator IAM.
+mkdir -p "$TMP/gcp-fail-bin"
+cat > "$TMP/gcp-fail-bin/gcloud" <<'STUB'
+#!/bin/bash
+echo "ERROR: (gcloud.auth.print-access-token) Permission denied (stubbed)" >&2
+exit 1
+STUB
+chmod +x "$TMP/gcp-fail-bin/gcloud"
+out_preflight=$(PATH="$TMP/gcp-fail-bin:$PATH" CCODE_SRC="$TEST_RW" \
+                CCODE_GCP_IMPERSONATE="$TEST_SA" "$SCRIPT" 2>&1 || true)
+if grep -q 'impersonation preflight failed' <<<"$out_preflight"; then
+    ok "preflight failure surfaces with a clear message"
+else
+    fail "preflight failure surfaces with a clear message" "got: $out_preflight"
+fi
+
+echo
 echo "==== summary ===="
 echo "PASS: $PASS"
 echo "FAIL: $FAIL"

@@ -132,6 +132,13 @@ NETPROXY_SOCKS_PORT=""
 NETPROXY_PID=""
 NETPROXY_POLICY_PATH=""
 
+# Optional GCP SA impersonation via a host-side metadata-server emulator.
+# Declared up here so cleanup() can reference the PID unconditionally; the
+# actual start block sits next to the SA-key block lower down.
+GCP_METADATA_PID=""
+GCP_METADATA_PORT=""
+GCP_METADATA_PROJECT=""
+
 if [[ -n "${CCODE_NETPOLICY:-}" ]]; then
     if [[ "$CCODE_NETPOLICY" = /* ]]; then
         NETPROXY_POLICY_PATH="$CCODE_NETPOLICY"
@@ -600,6 +607,14 @@ cleanup() {
         done
         kill -9 "$NETPROXY_PID" 2>/dev/null || true
     fi
+    if [[ -n "$GCP_METADATA_PID" ]] && kill -0 "$GCP_METADATA_PID" 2>/dev/null; then
+        kill "$GCP_METADATA_PID" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "$GCP_METADATA_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -9 "$GCP_METADATA_PID" 2>/dev/null || true
+    fi
     if [[ -n "$NOEXEC_MARKER" && -f "$NOEXEC_MARKER" ]]; then
         # find: files newer than the marker that currently have any x bit set,
         # then chmod a-x. -perm +ugo+x matches if ANY x bit is set. The `+`
@@ -623,63 +638,154 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── Optional: GCP service-account credentials for in-sandbox use. ────────
+# ── Optional: GCP SA impersonation via host-side metadata-server emulator ─
 #
-# Set CCODE_GCP_SA_KEY to the absolute path of a JSON key file for a
-# service account in a self-serve "Sandbox GCP project" (a narrow-scope
-# project where devs can mint SAs without production reach). When set,
-# the launcher:
+# Set CCODE_GCP_IMPERSONATE to an SA email. The host user's ADC must hold
+# roles/iam.serviceAccountTokenCreator on that SA.
 #
-#   1. read-only mounts the key file (file literal, not the parent dir,
-#      so the agent sees exactly this key and nothing alongside it);
-#   2. exports GOOGLE_APPLICATION_CREDENTIALS so ADC-using GCP libraries
-#      (Python google-cloud-*, Java, Go) authenticate as the SA;
-#   3. redirects CLOUDSDK_CONFIG to $SBX/gcloud so the gcloud CLI's
-#      active-account / cached-token state stays inside the sandbox and
-#      never touches the host ~/.config/gcloud/;
-#   4. runs `gcloud auth activate-service-account` once so the gcloud,
-#      bq, and gsutil CLIs work in-sandbox without manual setup.
+# A small loopback HTTP server (ccode-gcp-metadata) runs OUTSIDE the
+# sandbox and emulates the GCE metadata API. It mints impersonated access
+# tokens via `gcloud auth print-access-token --impersonate-service-account`
+# (so the source identity stays on the host, never enters the sandbox).
+# Inside the sandbox, GCE_METADATA_HOST / GCE_METADATA_ROOT steer GCP
+# client libraries (gcloud, bq, Python google-auth, Go oauth2/google) to
+# that loopback server; tokens refresh transparently before expiry.
 #
-# Trade-off: the key file is long-lived and at rest on disk. A
-# compromised agent that can both read the file AND exfiltrate it to an
-# allowlisted network destination defeats this scheme; rotation cadence
-# and IAM-scope discipline are the user's responsibility. The
-# alternative — a loopback HTTP server emulating the GCE metadata API
-# that mints short-lived tokens on demand — would remove the key-at-rest
-# property and let this whole block be deleted.
+# Project served from /project/project-id is derived from the SA email
+# (`<name>@<project>.iam.gserviceaccount.com`). Override with
+# CCODE_GCP_PROJECT when the billing/job-execution project differs from
+# the SA's home project.
 #
-# Note: --print-profile exited earlier, so the file-read rule added
-# here is not visible in printed-profile output. This block is otherwise
-# self-contained; the four feature pieces above can be ripped out in
-# one delete when a metadata-API alternative supersedes it.
-if [[ -n "${CCODE_GCP_SA_KEY:-}" ]]; then
-    CCODE_GCP_SA_KEY="${CCODE_GCP_SA_KEY/#\~/$HOME}"
-    if [[ "$CCODE_GCP_SA_KEY" != /* ]]; then
-        echo "ccode: CCODE_GCP_SA_KEY must be an absolute path: $CCODE_GCP_SA_KEY" >&2
+# ID-token issuance (the /identity endpoint) is intentionally not
+# implemented; tools that need OIDC identity tokens have no fallback
+# in this launcher today.
+if [[ -n "${CCODE_GCP_IMPERSONATE:-}" ]]; then
+    if [[ "$CCODE_GCP_IMPERSONATE" != *@*.iam.gserviceaccount.com ]]; then
+        echo "ccode: CCODE_GCP_IMPERSONATE must be an SA email, got: $CCODE_GCP_IMPERSONATE" >&2
         exit 1
     fi
-    if [[ ! -r "$CCODE_GCP_SA_KEY" ]]; then
-        echo "ccode: CCODE_GCP_SA_KEY not readable: $CCODE_GCP_SA_KEY" >&2
+
+    # Derive project from the SA email unless explicitly overridden. The
+    # SA's home project (encoded in the email) is also the BigQuery
+    # billing/job-execution project in the common case; set
+    # CCODE_GCP_PROJECT for the unusual case where they differ.
+    if [[ -n "${CCODE_GCP_PROJECT:-}" ]]; then
+        GCP_METADATA_PROJECT="$CCODE_GCP_PROJECT"
+    elif [[ "$CCODE_GCP_IMPERSONATE" =~ @([^.]+)\.iam\.gserviceaccount\.com$ ]]; then
+        GCP_METADATA_PROJECT="${BASH_REMATCH[1]}"
+    else
+        echo "ccode: could not derive project from $CCODE_GCP_IMPERSONATE; set CCODE_GCP_PROJECT" >&2
         exit 1
     fi
-    mkdir -p "$SBX/gcloud"
 
-    PROFILE+=$'\n'";; CCODE_GCP_SA_KEY: $CCODE_GCP_SA_KEY"
-    PROFILE+=$'\n'"(allow file-read* (literal \"$CCODE_GCP_SA_KEY\"))"
-
-    ENV_ARGS+=(
-        GOOGLE_APPLICATION_CREDENTIALS="$CCODE_GCP_SA_KEY"
-        CLOUDSDK_CONFIG="$SBX/gcloud"
-    )
-
-    if ! env -i "${ENV_ARGS[@]}" sandbox-exec -p "$PROFILE" \
-            "$(command -v gcloud)" auth activate-service-account \
-            --key-file="$CCODE_GCP_SA_KEY" --quiet >/dev/null 2>&1; then
-        echo "ccode: gcloud auth activate-service-account failed for $CCODE_GCP_SA_KEY" >&2
+    GCP_METADATA_BIN="$REPO_DIR/bin/ccode-gcp-metadata"
+    if [[ ! -x "$GCP_METADATA_BIN" ]]; then
+        echo "ccode: $GCP_METADATA_BIN not built. Run \`make\` in $REPO_DIR first." >&2
         exit 1
+    fi
+
+    if [[ "${1:-}" != "--print-profile" ]]; then
+        # Preflight: confirm host ADC can mint an impersonated token. Catches
+        # missing tokenCreator IAM / no ADC / typo'd SA email up front rather
+        # than as a confusing 502 inside the sandbox on first token request.
+        if ! _err=$(gcloud auth print-access-token \
+                    --impersonate-service-account="$CCODE_GCP_IMPERSONATE" \
+                    --lifetime=60 2>&1 >/dev/null); then
+            echo "ccode: gcloud impersonation preflight failed for $CCODE_GCP_IMPERSONATE:" >&2
+            echo "$_err" >&2
+            echo "ccode: check (1) host gcloud is logged in, (2) you have roles/iam.serviceAccountTokenCreator on the SA" >&2
+            exit 1
+        fi
+
+        GCP_METADATA_STATUS="$SBX/gcp-metadata-status-$$"
+        GCP_METADATA_LOG="$SBX/gcp-metadata.log"
+        "$GCP_METADATA_BIN" \
+            --sa "$CCODE_GCP_IMPERSONATE" \
+            --project "$GCP_METADATA_PROJECT" \
+            > "$GCP_METADATA_STATUS" 2> "$GCP_METADATA_LOG" &
+        GCP_METADATA_PID=$!
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+            if [[ -s "$GCP_METADATA_STATUS" ]] && \
+               grep -q '^PORT=' "$GCP_METADATA_STATUS"; then
+                break
+            fi
+            if ! kill -0 "$GCP_METADATA_PID" 2>/dev/null; then
+                echo "ccode: gcp-metadata died on startup. Log ($GCP_METADATA_LOG):" >&2
+                cat "$GCP_METADATA_LOG" >&2
+                exit 1
+            fi
+            sleep 0.2
+        done
+        line=""
+        read -r line < "$GCP_METADATA_STATUS" 2>/dev/null || true
+        if [[ "$line" =~ PORT=([0-9]+) ]]; then
+            GCP_METADATA_PORT="${BASH_REMATCH[1]}"
+        fi
+        rm -f "$GCP_METADATA_STATUS"
+        if [[ -z "$GCP_METADATA_PORT" ]]; then
+            echo "ccode: gcp-metadata did not report port. Log ($GCP_METADATA_LOG):" >&2
+            cat "$GCP_METADATA_LOG" >&2
+            kill "$GCP_METADATA_PID" 2>/dev/null || true
+            exit 1
+        fi
+        echo "ccode: gcp-metadata started (sa=$CCODE_GCP_IMPERSONATE project=$GCP_METADATA_PROJECT port=$GCP_METADATA_PORT)" >&2
+
+        # gcloud needs a writable config root to drop its own state (active
+        # config marker, cached metadata-server account, etc.). Wiped on
+        # every launch to force gcloud to re-discover identity via the
+        # metadata server -- otherwise stale active-account / cached-token
+        # state from a previous session can shadow the metadata server.
+        rm -rf "$SBX/gcloud-impersonate"
+        mkdir -p "$SBX/gcloud-impersonate/configurations"
+
+        # On a real GCE VM, gcloud auto-detects the metadata server and
+        # populates active-account / project on first run. With just
+        # GCE_METADATA_HOST set and no other GCE signals, that auto-
+        # populate doesn't always fire, leaving `bq` / `gsutil` to error
+        # with "no active account". Pre-write the config so those tools
+        # see a usable account immediately; credentials still come from
+        # the metadata server (credentials.db stays empty, which is fine
+        # because gcloud falls through to the metadata-server ADC path).
+        # No trailing newline: gcloud reads this verbatim and treats
+        # "default\n" as a different config name than "default", which
+        # makes it miss configurations/config_default.
+        printf 'default' > "$SBX/gcloud-impersonate/active_config"
+        cat > "$SBX/gcloud-impersonate/configurations/config_default" <<GCLOUD_CONF
+[core]
+account = $CCODE_GCP_IMPERSONATE
+project = $GCP_METADATA_PROJECT
+GCLOUD_CONF
+
+        ENV_ARGS+=(
+            # GCE_METADATA_HOST is read by client libraries (Python
+            # google-auth, Go oauth2/google) via the requests path.
+            # GCE_METADATA_ROOT is what gcloud's GCE-detection / auth
+            # code in `gce_read.py` reads -- without it, gcloud probes
+            # the hardcoded metadata.google.internal and fails over to
+            # credentials.db, which is empty in our setup.
+            GCE_METADATA_HOST="127.0.0.1:$GCP_METADATA_PORT"
+            GCE_METADATA_ROOT="127.0.0.1:$GCP_METADATA_PORT"
+            GCE_METADATA_IP="127.0.0.1:$GCP_METADATA_PORT"
+            GOOGLE_CLOUD_PROJECT="$GCP_METADATA_PROJECT"
+            CLOUDSDK_CORE_PROJECT="$GCP_METADATA_PROJECT"
+            CLOUDSDK_CONFIG="$SBX/gcloud-impersonate"
+        )
+
+        # Homebrew's gcloud wrapper sources a Python virtualenv at
+        # ~/.config/gcloud/virtenv/bin/activate before exec'ing the CLI.
+        # Allow reading that subpath so the wrapper runs. The parent
+        # ~/.config/gcloud/ is *not* exposed: it contains the user's
+        # credentials.db / application_default_credentials.json, which a
+        # compromised agent could otherwise read and use to bypass the
+        # impersonation boundary. virtenv/ holds only gcloud's own code
+        # and Python deps, no credentials.
+        if [[ -d "$HOME/.config/gcloud/virtenv" ]]; then
+            PROFILE+=$'\n'";; gcloud homebrew virtenv (for CCODE_GCP_IMPERSONATE)"
+            PROFILE+=$'\n'"(allow file-read* (subpath \"$HOME/.config/gcloud/virtenv\"))"
+        fi
     fi
 fi
-# ── end CCODE_GCP_SA_KEY ─────────────────────────────────────────────────
+# ── end CCODE_GCP_IMPERSONATE ────────────────────────────────────────────
 
 # bypassPermissions: filesystem restrictions above replace claude's per-tool
 # permission prompts. --mcp-config is added if the user has one.
