@@ -2,13 +2,8 @@
 
 This branch (`mozdata`, off the `padenot/moz-local-sandbox` upstream)
 adds the bits that make `ccode-macos` usable for Mozilla Data
-Engineering work: GCP/BigQuery access, Atlassian + DataHub network
-reach, JVM/Maven for Beam-style ETL jobs, and a handful of toolchain
-redirects.
-
-Lives in the repo dir for proximity to the launcher; not part of the
-upstream contribution. Move it out if these notes ever stop being
-useful for managing the `mozdata` branch.
+Engineering work: GCP/BigQuery access, JVM/Maven for Beam-style ETL
+jobs, and a handful of toolchain redirects.
 
 ## Modifications vs `padenot/moz-local-sandbox`
 
@@ -32,24 +27,13 @@ at `~/.sandbox/<tool>/` instead.
 - `XDG_CACHE_HOME` redirected so XDG-honoring tools (`pre-commit`, `gh`, ...) keep working without hitting the blocked `~/.cache/`.
 - `XDG_DATA_HOME` redirected so `uv` / `uvx` can write downloaded Python interpreters and tool envs.
 - `GOCACHE` redirected explicitly: macOS Go ignores `XDG_CACHE_HOME` and would otherwise hit the blocked `~/Library/Caches/go-build/`.
-- `MAVEN_OPTS=-Dmaven.repo.local=...` points Maven at a sandbox-private local repository; a generated `settings.xml` routes Maven Resolver through the netproxy; `-Dhttps.proxyHost=...` system properties get added for plugins (Spotless, etc.) that bypass the Resolver.
+- `MAVEN_OPTS=-Dmaven.repo.local=...` points Maven at a sandbox-private local repository so builds don't write to the host `~/.m2/`.
 - `JAVA_HOME` set to SDKMAN's `candidates/java/current` so `mvn`, `javac`, and other JDK tools find a workable JDK.
 
 ### Sandbox profile additions
 
 - `~/.config/gcx` exposed RO (Mozilla-internal CLI).
 - `~/.config/gcloud/virtenv` exposed RO when `CCODE_GCP_IMPERSONATE` is active (Homebrew gcloud wrapper sources the activate script from there; parent `~/.config/gcloud/` is intentionally NOT exposed because it holds the host user's ADC and `credentials.db`).
-
-### Network policy
-
-`policies/anthropic-mozilla.json` extends `anthropic-only` with the
-hosts a DE session typically needs:
-
-- Mozilla services (Phabricator, Bugzilla, BMO API, telemetry stack)
-- GitHub + npm + crates.io + PyPI (host package fetching)
-- Atlassian (`mozilla-hub.atlassian.net` for Jira / Confluence MCP)
-- Acryl DataHub (`mozilla.acryl.io` metadata catalog)
-- `*.googleapis.com` (BigQuery, IAM credentials, OAuth)
 
 ## Usage
 
@@ -58,7 +42,6 @@ hosts a DE session typically needs:
 ```sh
 CCODE_CWD_ONLY=1 \
 CCODE_RO_EXTRA=~/mozilla \
-CCODE_NETPOLICY=anthropic-mozilla \
 CCODE_GH_TOKEN=$(op read 'op://Employee/<github-pat-item>/credential') \
   ~/mozilla/dev/moz-local-sandbox/ccode-macos
 ```
@@ -67,15 +50,19 @@ What each var does:
 
 - `CCODE_CWD_ONLY=1`: restrict rw to the current directory rather than the whole `$CCODE_SRC` tree.
 - `CCODE_RO_EXTRA=~/mozilla`: re-expose the rest of `~/mozilla` read-only so cross-repo greps still work.
-- `CCODE_NETPOLICY=anthropic-mozilla`: start netproxy with the Mozilla allowlist policy. Sandbox is locked to loopback; the proxy filters by hostname.
 - `CCODE_GH_TOKEN=...`: forward a scoped GitHub PAT instead of the host keychain token.
+
+Network egress is unfiltered upstream; the sandbox's only network-layer
+isolation is that it shares the host's network namespace and runs as
+your user. The Mozilla services a DE session typically needs
+(Phabricator, Bugzilla, Atlassian, Acryl DataHub, GitHub, npm, PyPI,
+`*.googleapis.com`) are reachable by default.
 
 ### With GCP (impersonation)
 
 ```sh
 CCODE_CWD_ONLY=1 \
 CCODE_RO_EXTRA=~/mozilla \
-CCODE_NETPOLICY=anthropic-mozilla \
 CCODE_GH_TOKEN=$(op read 'op://Employee/<github-pat-item>/credential') \
 CCODE_GCP_IMPERSONATE=bq-dev-sandbox@moz-fx-data-proto.iam.gserviceaccount.com \
   ~/mozilla/dev/moz-local-sandbox/ccode-macos
@@ -107,9 +94,10 @@ Prerequisites:
 Why not just `gcloud config set auth/impersonate_service_account`
 inside the sandbox: that flow needs your *user* ADC as the source
 identity, and your user identity has far more reach than any scoped
-SA (including the prod BQ write you'd otherwise be firewalling
-against). So the impersonation happens outside the sandbox; only the
-result enters.
+SA (including prod BQ write). Keeping the ADC outside the sandbox
+means the in-sandbox capabilities are bounded by the SA's IAM, not by
+your account's. The impersonation happens on the host; only the
+resulting access token enters.
 
 No fallback for OIDC identity tokens: the metadata server returns 404
 on the `/identity` endpoint. If a tool needs identity tokens (IAP-
