@@ -573,11 +573,10 @@ ENV_ARGS=(
 # adversarial agent inside the sandbox from running `env -u GH_TOKEN
 # gh auth token` to query the host keychain and recover the full-access
 # token gh is currently logged in with. The keychain entry's ACL is
-# keyed by gh's code signature, which sandbox-exec does not change. A
-# future iteration could inject GH credentials at the netproxy layer
-# so the token never enters the sandbox env at all; for now, the
-# netproxy still limits the destinations a recovered token can be used
-# against.
+# keyed by gh's code signature, which sandbox-exec does not change. The
+# in-sandbox network egress is unfiltered (upstream removed the
+# host-level proxy), so a recovered token can be used against anywhere
+# the underlying network reaches.
 if [[ -n "${CCODE_GH_TOKEN:-}" ]]; then
     ENV_ARGS+=(GH_TOKEN="$CCODE_GH_TOKEN")
 elif _GH_TOKEN=$(gh auth token 2>/dev/null) && [[ -n "$_GH_TOKEN" ]]; then
