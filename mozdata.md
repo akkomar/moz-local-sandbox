@@ -27,6 +27,7 @@ at `~/.sandbox/<tool>/` instead.
 - `XDG_CACHE_HOME` redirected so XDG-honoring tools (`pre-commit`, `gh`, ...) keep working without hitting the blocked `~/.cache/`.
 - `XDG_DATA_HOME` redirected so `uv` / `uvx` can write downloaded Python interpreters and tool envs.
 - `GOCACHE` redirected explicitly: macOS Go ignores `XDG_CACHE_HOME` and would otherwise hit the blocked `~/Library/Caches/go-build/`.
+- `BLACK_CACHE_DIR` and `MYPY_CACHE_DIR` redirected: both tools use `platformdirs` which on macOS returns `~/Library/Caches/<app>` and ignores `XDG_CACHE_HOME`.
 - `MAVEN_OPTS=-Dmaven.repo.local=...` points Maven at a sandbox-private local repository so builds don't write to the host `~/.m2/`.
 - `JAVA_HOME` set to SDKMAN's `candidates/java/current` so `mvn`, `javac`, and other JDK tools find a workable JDK.
 
@@ -163,14 +164,29 @@ recorded so future debugging doesn't re-derive them:
 Python tools that resolve their cache dir via `platformdirs` /
 `appdirs` get `~/Library/Caches/<app>` on macOS and **ignore**
 `XDG_CACHE_HOME`. The sandbox blocks `~/Library/Caches/` so those
-tools fail with `PermissionError: ... could not be created`.
+tools fail with `PermissionError: ... could not be created` (or, from
+a plain `touch`, `Operation not permitted`).
 
-Hit in: `glean_parser` tests that exercise
-`validate_ping.validate_ping(...)` (uses `diskcache` writing to
-`~/Library/Caches/glean_parser`).
-
-No general launcher fix yet (would need to open up `~/Library/Caches/`
+No general launcher fix (would need to open up `~/Library/Caches/`
 RW with the same contamination concern we deliberately avoided for
-`~/.cache/`). Per-tool workarounds: check if the tool has a custom
-cache-dir env var or CLI flag. For glean_parser specifically, just
-skip the affected tests in-sandbox.
+`~/.cache/`). The workable shape is one per-tool override.
+
+Per-tool overrides already wired into the launcher:
+
+| Tool | Mechanism |
+|---|---|
+| Go (build cache) | `GOCACHE=$SBX/go-build` |
+| Maven (local repo) | `MAVEN_OPTS=-Dmaven.repo.local=$SBX/m2/repository` |
+| black | `BLACK_CACHE_DIR=$SBX/black` |
+| mypy | `MYPY_CACHE_DIR=$SBX/mypy` |
+
+Per-tool overrides you may still need per-invocation (no env var
+exists, so the launcher can't handle it):
+
+- `pip-compile` (pip-tools) - pass `--cache-dir <path-inside-workspace>` on each call.
+- `glean_parser` tests that hit `diskcache` via `validate_ping.validate_ping(...)` - no override surface; skip the affected tests in-sandbox.
+
+When a new tool fails with `Operation not permitted` writing under
+`~/Library/Caches/`, check first whether it has a documented env var
+or CLI flag for its cache dir. If yes, add an env var to the
+launcher; otherwise it joins the per-invocation list above.

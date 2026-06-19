@@ -106,6 +106,8 @@ mkdir -p \
     "$SBX/m2/repository" \
     "$SBX/xdg-cache" \
     "$SBX/xdg-data" \
+    "$SBX/black" \
+    "$SBX/mypy" \
     "$SBX/empty-hooks"
 
 # ~/.claude is shared rw with the host (re-exposed below). We had it
@@ -516,6 +518,13 @@ ENV_ARGS=(
     # via XDG_DATA_HOME pins uv (and other XDG-honoring tools) to a
     # writable sandbox-private dir.
     XDG_DATA_HOME="$SBX/xdg-data"
+
+    # black and mypy use platformdirs for their cache dirs, which on
+    # macOS returns ~/Library/Caches/<app> and ignores XDG_CACHE_HOME.
+    # Set the documented per-tool env vars so both can write to a
+    # sandbox-private location instead.
+    BLACK_CACHE_DIR="$SBX/black"
+    MYPY_CACHE_DIR="$SBX/mypy"
 
     # Rust toolchains (rustup-managed): host-shared, read-only. `rustup
     # update` will fail inside the sandbox by design — install toolchains
