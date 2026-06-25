@@ -771,10 +771,13 @@ if [[ -n "${CCODE_GCP_IMPERSONATE:-}" ]]; then
 
         GCP_METADATA_STATUS="$SBX/gcp-metadata-status-$$"
         GCP_METADATA_LOG="$SBX/gcp-metadata.log"
+        # Append so failed sessions leave evidence across restarts; the
+        # binary's startup banner (`gcp-metadata on 127.0.0.1:PORT ...`)
+        # marks where each new session begins in the file.
         "$GCP_METADATA_BIN" \
             --sa "$CCODE_GCP_IMPERSONATE" \
             --project "$GCP_METADATA_PROJECT" \
-            > "$GCP_METADATA_STATUS" 2> "$GCP_METADATA_LOG" &
+            > "$GCP_METADATA_STATUS" 2>> "$GCP_METADATA_LOG" &
         GCP_METADATA_PID=$!
         for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
             if [[ -s "$GCP_METADATA_STATUS" ]] && \
